@@ -36,7 +36,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Flutter
-        shell: pwsh
+        shell: powershell
         run: |
           $flutterRoot = "C:\Flutter\flutter_windows_3.47.5-stable\flutter"
           $flutterBin = Join-Path $flutterRoot "bin"
@@ -54,7 +54,7 @@ jobs:
           }
 
       - name: Install Flutter dependencies
-        shell: pwsh
+        shell: powershell
         run: |
           flutter pub get
           if ($LASTEXITCODE -ne 0) {
@@ -62,7 +62,7 @@ jobs:
           }
 
       - name: Analyze Flutter code
-        shell: pwsh
+        shell: powershell
         run: |
           flutter analyze --no-pub
           if ($LASTEXITCODE -ne 0) {
@@ -70,7 +70,7 @@ jobs:
           }
 
       - name: Run tests and generate coverage
-        shell: pwsh
+        shell: powershell
         run: |
           flutter test --no-pub --coverage
           if ($LASTEXITCODE -ne 0) {
@@ -78,7 +78,7 @@ jobs:
           }
 
       - name: Verify coverage report
-        shell: pwsh
+        shell: powershell
         run: |
           $coverageFile = "coverage/lcov.info"
 
