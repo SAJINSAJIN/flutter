@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 void main() {
   runApp(const MyApp());
 }
-final String _titles = 'Flutter Demo';
+final String titles = 'Flutter Demo';
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
