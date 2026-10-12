@@ -1,14 +1,11 @@
 
 name: Flutter CI and SonarQube
 
-'on':
+on:
   pull_request:
     branches:
       - main
-    types:
-      - opened
-      - synchronize
-      - reopened
+    types: [opened, synchronize, reopened]
   push:
     branches:
       - main
@@ -23,113 +20,153 @@ jobs:
 
     defaults:
       run:
-        shell: powershell -ExecutionPolicy Bypass -File "{0}"
+        shell: powershell
+
+    env:
+      FLUTTER_HOME: C:\Flutter\flutter_windows_3.47.5-stable\flutter
+      MIN_COVERAGE: "95"
 
     steps:
-      # 1. Checkout source code
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2. Configure Java for SonarScanner
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
 
-      # 3. Add existing Flutter SDK to PATH
       - name: Configure Flutter SDK
         run: |
-          $flutterPath = "C:\Flutter\flutter_windows_3.47.5-stable\flutter"
+          $flutterBin = Join-Path $env:FLUTTER_HOME "bin"
 
-          if (!(Test-Path "$flutterPath\bin\flutter.bat")) {
-            throw "Flutter SDK not found at $flutterPath"
+          if (!(Test-Path "$flutterBin\flutter.bat")) {
+            throw "Flutter SDK not found: $flutterBin"
           }
 
-          Add-Content -Path $env:GITHUB_PATH -Value "$flutterPath\bin"
+          Add-Content -Path $env:GITHUB_PATH -Value $flutterBin
+          Write-Host "Flutter SDK configured."
 
-          Write-Host "Flutter SDK path configured."
-
-      - name: Verify Flutter installation
+      - name: Verify Flutter
         run: |
           flutter --version
-          flutter doctor -v
+          if ($LASTEXITCODE -ne 0) {
+            throw "Flutter version check failed."
+          }
 
-      # 4. Install project dependencies
+          dart --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Dart version check failed."
+          }
+
+      - name: Verify project structure
+        run: |
+          if (!(Test-Path "pubspec.yaml")) {
+            throw "pubspec.yaml not found."
+          }
+
+          if (!(Test-Path "lib")) {
+            throw "Flutter lib directory not found."
+          }
+
+          $dartFiles = @(
+            Get-ChildItem "lib" -Filter "*.dart" -Recurse -File
+          )
+
+          Write-Host "Dart source files: $($dartFiles.Count)"
+
+          if ($dartFiles.Count -eq 0) {
+            throw "No Dart source files found."
+          }
+
       - name: Install Flutter dependencies
-        run: flutter pub get
+        run: |
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) {
+            throw "Flutter dependency installation failed."
+          }
 
-      # 5. Check Dart code
-      - name: Flutter analyze
-        run: flutter analyze --no-pub
+      - name: Flutter static analysis
+        run: |
+          flutter analyze --no-pub
 
-      # 6. Run tests and generate LCOV coverage
+          if ($LASTEXITCODE -ne 0) {
+            throw "Flutter static analysis failed."
+          }
+
       - name: Run Flutter tests with coverage
         run: |
-          flutter test --no-pub --coverage
+          $testFiles = @(
+            Get-ChildItem "test" -Filter "*_test.dart" -Recurse -File
+          )
+
+          if ($testFiles.Count -eq 0) {
+            throw "No Flutter test files found."
+          }
+
+          flutter test --no-pub --coverage --machine `
+            1> tests.output
 
           if ($LASTEXITCODE -ne 0) {
             throw "Flutter tests failed."
+          }
+
+          if (!(Test-Path "tests.output")) {
+            throw "Test report was not generated."
           }
 
           if (!(Test-Path "coverage\lcov.info")) {
             throw "Coverage report was not generated."
           }
 
-      # 7. Enforce minimum 95% line coverage
-      - name: Enforce minimum 95% line coverage
+      - name: Enforce minimum line coverage
         run: |
-          $coverageFile = Join-Path $env:GITHUB_WORKSPACE "coverage\lcov.info"
+          $coverageFile = Join-Path `
+            $env:GITHUB_WORKSPACE "coverage\lcov.info"
 
           if (!(Test-Path $coverageFile)) {
-            throw "Coverage report not found: $coverageFile"
+            throw "Coverage report not found."
           }
-
-          $report = Get-Content $coverageFile -Raw
-
-          $lfMatches = [regex]::Matches(
-            $report,
-            '(?m)^LF:(\d+)\s*$'
-          )
-
-          $lhMatches = [regex]::Matches(
-            $report,
-            '(?m)^LH:(\d+)\s*$'
-          )
 
           $totalLF = 0
-          foreach ($match in $lfMatches) {
-            $totalLF += [int]$match.Groups[1].Value
-          }
-
           $totalLH = 0
-          foreach ($match in $lhMatches) {
-            $totalLH += [int]$match.Groups[1].Value
+
+          foreach ($line in [System.IO.File]::ReadLines($coverageFile)) {
+            if ($line -match '^LF:(\d+)\s*$') {
+              $totalLF += [long]$Matches[1]
+            }
+            elseif ($line -match '^LH:(\d+)\s*$') {
+              $totalLH += [long]$Matches[1]
+            }
           }
 
           if ($totalLF -le 0) {
-            throw "No executable lines found in the coverage report."
+            throw "No executable lines found in coverage."
+          }
+
+          if ($totalLH -gt $totalLF) {
+            throw "Invalid coverage report."
           }
 
           $coverage = 100.0 * $totalLH / $totalLF
+          $minimum = [double]$env:MIN_COVERAGE
 
-          Write-Host ""
-          Write-Host "========================================"
+          Write-Host "================================"
           Write-Host ("Line coverage: {0:N2}%" -f $coverage)
-          Write-Host ("Covered lines: {0}" -f $totalLH)
-          Write-Host ("Total lines:   {0}" -f $totalLF)
-          Write-Host "Required:      90.00%"
-          Write-Host "========================================"
+          Write-Host "Covered lines: $totalLH"
+          Write-Host "Total lines: $totalLF"
+          Write-Host ("Minimum: {0:N2}%" -f $minimum)
+          Write-Host "================================"
 
-          if ($coverage -lt 90.0) {
-            throw ("Coverage {0:N2}% is below the required 95%." -f $coverage)
+          if ($coverage -lt $minimum) {
+            throw ("Coverage {0:N2}% below {1:N2}%" -f `
+              $coverage, $minimum)
           }
 
           Write-Host "Coverage requirement passed."
 
-      # 8. Run SonarQube only on main branch pushes
       - name: SonarQube Scan
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -137,32 +174,34 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SONAR_HOST_URL)) {
-            throw "GitHub secret SONAR_HOST_URL is not configured."
+            throw "SONAR_HOST_URL is not configured."
           }
 
           if ([string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) {
-            throw "GitHub secret SONAR_TOKEN is not configured."
+            throw "SONAR_TOKEN is not configured."
           }
 
           if (!(Test-Path "sonar-project.properties")) {
-            throw "sonar-project.properties was not found in the repository root."
+            throw "sonar-project.properties not found."
           }
 
-          # Download SonarScanner CLI
-          $scannerZip = Join-Path $env:RUNNER_TEMP "sonar-scanner.zip"
-          $scannerRoot = Join-Path $env:RUNNER_TEMP "sonar-scanner"
+          $scannerVersion = "7.2.0.5079"
+          $scannerFile = "sonar-scanner-cli-$scannerVersion-windows-x64.zip"
 
-          $scannerUrl = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-7.2.0.5079-windows-x64.zip"
+          $scannerUrl = `
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/$scannerFile"
+
+          $scannerZip = Join-Path $env:RUNNER_TEMP $scannerFile
+          $scannerRoot = Join-Path $env:RUNNER_TEMP "sonar-scanner"
 
           Invoke-WebRequest `
             -Uri $scannerUrl `
-            -OutFile $scannerZip
+            -OutFile $scannerZip `
+            -ErrorAction Stop
 
           if (Test-Path $scannerRoot) {
             Remove-Item $scannerRoot -Recurse -Force
           }
-
-          New-Item -ItemType Directory -Path $scannerRoot -Force | Out-Null
 
           Expand-Archive `
             -Path $scannerZip `
@@ -176,7 +215,7 @@ jobs:
             Select-Object -First 1 -ExpandProperty FullName
 
           if (!$scanner) {
-            throw "SonarScanner executable was not found after extraction."
+            throw "SonarScanner executable not found."
           }
 
           Write-Host "Running SonarQube analysis..."
@@ -187,8 +226,10 @@ jobs:
             "-Dsonar.qualitygate.wait=true" `
             "-Dsonar.qualitygate.timeout=600"
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "SonarQube analysis failed or the quality gate was not passed."
+          $scanExitCode = $LASTEXITCODE
+
+          if ($scanExitCode -ne 0) {
+            throw "SonarQube scan failed. Exit code: $scanExitCode"
           }
 
-          Write-Host "SonarQube analysis and quality gate passed."
+          Write-Host "SonarQube quality gate passed."
