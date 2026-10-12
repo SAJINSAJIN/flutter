@@ -15,17 +15,15 @@ name: Flutter CI and SonarQube
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
-  flutter-quality:
-    name: Flutter CI and SonarQube
-    runs-on: self-hosted
-    timeout-minutes: 30
+  flutter-ci:
+    name: Flutter CI and Coverage
+    runs-on: [self-hosted, Windows, X64]
 
     defaults:
       run:
-        shell: powershell -ExecutionPolicy Bypass -command ". '{0}'"
+        shell: powershell
 
     steps:
       # 1. Checkout source code
@@ -34,51 +32,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 2. Install Java for SonarScanner
+      # 2. Configure Java for SonarScanner
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      # 3. Configure the existing Flutter SDK on Windows
-      - name: Set up Flutter
+      # 3. Add existing Flutter SDK to PATH
+      - name: Configure Flutter SDK
         run: |
-          $ErrorActionPreference = "Stop"
+          $flutterPath = "C:\Flutter\flutter_windows_3.47.5-stable\flutter"
 
-          $flutterRoot = "C:\Flutter\flutter_windows_3.47.5-stable\flutter"
-          $flutterBin = Join-Path $flutterRoot "bin"
-          $flutterExe = Join-Path $flutterBin "flutter.bat"
-
-          if (!(Test-Path $flutterExe)) {
-            throw "Flutter SDK not found at $flutterExe"
+          if (!(Test-Path "$flutterPath\bin\flutter.bat")) {
+            throw "Flutter SDK not found at $flutterPath"
           }
 
-          Add-Content -Path $env:GITHUB_PATH -Value $flutterBin
+          Add-Content -Path $env:GITHUB_PATH -Value "$flutterPath\bin"
 
-          & $flutterExe --version
+          Write-Host "Flutter SDK path configured."
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Flutter version check failed."
-          }
+      - name: Verify Flutter installation
+        run: |
+          flutter --version
+          flutter doctor -v
 
-      # 4. Install dependencies
+      # 4. Install project dependencies
       - name: Install Flutter dependencies
-        run: |
-          flutter pub get
+        run: flutter pub get
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Flutter dependency installation failed."
-          }
-
-      # 5. Analyze Dart and Flutter code
+      # 5. Check Dart code
       - name: Flutter analyze
-        run: |
-          flutter analyze --no-pub
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Flutter analysis failed."
-          }
+        run: flutter analyze --no-pub
 
       # 6. Run tests and generate LCOV coverage
       - name: Run Flutter tests with coverage
@@ -89,8 +74,12 @@ jobs:
             throw "Flutter tests failed."
           }
 
-      # 7. Verify coverage report
-      - name: Verify coverage report
+          if (!(Test-Path "coverage\lcov.info")) {
+            throw "Coverage report was not generated."
+          }
+
+      # 7. Enforce minimum 95% line coverage
+      - name: Enforce minimum 95% line coverage
         run: |
           $coverageFile = Join-Path $env:GITHUB_WORKSPACE "coverage\lcov.info"
 
@@ -100,56 +89,94 @@ jobs:
 
           $report = Get-Content $coverageFile -Raw
 
-          if ($report -notmatch 'LF:\d+') {
-            throw "Coverage report contains no valid LF records."
+          $lfMatches = [regex]::Matches(
+            $report,
+            '(?m)^LF:(\d+)\s*$'
+          )
+
+          $lhMatches = [regex]::Matches(
+            $report,
+            '(?m)^LH:(\d+)\s*$'
+          )
+
+          $totalLF = 0
+          foreach ($match in $lfMatches) {
+            $totalLF += [int]$match.Groups[1].Value
           }
 
-          Write-Host "Flutter coverage report found: $coverageFile"
+          $totalLH = 0
+          foreach ($match in $lhMatches) {
+            $totalLH += [int]$match.Groups[1].Value
+          }
 
-      # 8. Download, extract, and run SonarScanner manually
-      - name: SonarQube scan and enforce quality gate
+          if ($totalLF -le 0) {
+            throw "No executable lines found in the coverage report."
+          }
+
+          $coverage = 100.0 * $totalLH / $totalLF
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host ("Line coverage: {0:N2}%" -f $coverage)
+          Write-Host ("Covered lines: {0}" -f $totalLH)
+          Write-Host ("Total lines:   {0}" -f $totalLF)
+          Write-Host "Required:      95.00%"
+          Write-Host "========================================"
+
+          if ($coverage -lt 95.0) {
+            throw ("Coverage {0:N2}% is below the required 95%." -f $coverage)
+          }
+
+          Write-Host "Coverage requirement passed."
+
+      # 8. Run SonarQube only on main branch pushes
+      - name: SonarQube Scan
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:SONAR_HOST_URL)) {
+            throw "GitHub secret SONAR_HOST_URL is not configured."
+          }
 
           if ([string]::IsNullOrWhiteSpace($env:SONAR_TOKEN)) {
-            throw "GitHub secret SONAR_TOKEN is missing."
+            throw "GitHub secret SONAR_TOKEN is not configured."
           }
 
-          if ([string]::IsNullOrWhiteSpace($env:SONAR_HOST_URL)) {
-            throw "GitHub secret SONAR_HOST_URL is missing."
+          if (!(Test-Path "sonar-project.properties")) {
+            throw "sonar-project.properties was not found in the repository root."
           }
 
-          $version = "7.2.0.5079"
-          $zip = Join-Path $env:RUNNER_TEMP "sonar-scanner.zip"
-          $extract = Join-Path $env:RUNNER_TEMP "sonar-scanner"
+          # Download SonarScanner CLI
+          $scannerZip = Join-Path $env:RUNNER_TEMP "sonar-scanner.zip"
+          $scannerRoot = Join-Path $env:RUNNER_TEMP "sonar-scanner"
 
-          $url = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-$version-windows-x64.zip"
+          $scannerUrl = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-7.2.0.5079-windows-x64.zip"
 
-          Write-Host "Downloading SonarScanner $version..."
+          Invoke-WebRequest `
+            -Uri $scannerUrl `
+            -OutFile $scannerZip
 
-          Invoke-WebRequest -Uri $url -OutFile $zip
-
-          if (!(Test-Path $zip) -or (Get-Item $zip).Length -eq 0) {
-            throw "SonarScanner ZIP download failed."
+          if (Test-Path $scannerRoot) {
+            Remove-Item $scannerRoot -Recurse -Force
           }
 
-          if (Test-Path $extract) {
-            Remove-Item $extract -Recurse -Force
-          }
+          New-Item -ItemType Directory -Path $scannerRoot -Force | Out-Null
 
-          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          Expand-Archive `
+            -Path $scannerZip `
+            -DestinationPath $scannerRoot `
+            -Force
 
-          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-
-          $scanner = Get-ChildItem $extract `
-            -Filter "sonar-scanner.bat" -Recurse |
+          $scanner = Get-ChildItem `
+            -Path $scannerRoot `
+            -Filter "sonar-scanner.bat" `
+            -Recurse |
             Select-Object -First 1 -ExpandProperty FullName
 
           if (!$scanner) {
-            throw "sonar-scanner.bat was not found."
+            throw "SonarScanner executable was not found after extraction."
           }
 
           Write-Host "Running SonarQube analysis..."
