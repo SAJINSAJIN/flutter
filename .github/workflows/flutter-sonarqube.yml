@@ -20,7 +20,7 @@ jobs:
 
     defaults:
       run:
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File "{0}"
 
     env:
       FLUTTER_HOME: C:\Flutter\flutter_windows_3.47.5-stable\flutter
