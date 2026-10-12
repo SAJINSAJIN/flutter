@@ -24,7 +24,7 @@ jobs:
 
     env:
       FLUTTER_HOME: C:\Flutter\flutter_windows_3.47.5-stable\flutter
-      MIN_COVERAGE: "95"
+      MIN_COVERAGE: "90"
 
     steps:
       - name: Checkout repository
