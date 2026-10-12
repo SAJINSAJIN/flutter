@@ -23,7 +23,7 @@ jobs:
 
     defaults:
       run:
-        shell: powershell
+        shell: powershell -ExecutionPolicy Bypass -File "{0}"
 
     steps:
       # 1. Checkout source code
